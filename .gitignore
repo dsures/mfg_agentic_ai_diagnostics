@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.env
+.venv/
+env/
+*.duckdb
+*.duckdb.wal
+plant_data.duckdb*
+chroma_db/
+*.sqlite3
+mosquitto/data/*
+mosquitto/log/*
+!mosquitto/data/.gitkeep
+!mosquitto/log/.gitkeep
+.vscode/
+.DS_Store
+Thumbs.db
