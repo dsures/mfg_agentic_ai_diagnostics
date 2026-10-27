@@ -1,182 +1,157 @@
-import streamlit as st
-import duckdb
-import pandas as pd
+import os
+import json
 import hashlib
-import uuid
+import sqlite3
 from datetime import datetime, timezone
-from streamlit_autorefresh import st_autorefresh
+import pandas as pd
+import streamlit as st
 
-st.set_page_config(
-    page_title="AsepticOps Copilot | Diagnostic Queue",
-    page_icon="🏭",
-    layout="wide"
-)
+DB_PATH = "plant_data.db"
+AUDIT_VAULT_DIR = "audit_vault"
+LINE_ID = "VIAL-PKG-01"
+PLANNED_SHIFT_VIALS = 20000
 
-# 1. Fetch System State
-def fetch_system_state():
-    try:
-        con = duckdb.connect("plant_data.duckdb", read_only=True)
-        latest = con.execute("""
-            SELECT recorded_at, machine_id, temp_c, speed_cpm, error_code 
-            FROM raw_telemetry 
-            ORDER BY recorded_at DESC 
-            LIMIT 1
-        """).fetchone()
+os.makedirs(AUDIT_VAULT_DIR, exist_ok=True)
 
-        oee_df = con.execute("SELECT temp_c, speed_cpm, error_code FROM raw_telemetry").fetchdf()
+st.set_page_config(page_title="GxP Packaging Monitor & Sign-Off", layout="wide")
 
-        queue_df = con.execute("""
-            SELECT incident_id, detected_at, machine_id, error_code, qualification_reason, status 
-            FROM incident_queue 
-            ORDER BY detected_at DESC
-        """).fetchdf()
+def get_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
 
-        processing_job = con.execute("""
-            SELECT incident_id, machine_id, error_code, qualification_reason, detected_at 
-            FROM incident_queue 
-            WHERE status = 'PROCESSING' 
-            ORDER BY detected_at ASC 
-            LIMIT 1
-        """).fetchone()
+def load_latest_telemetry(limit: int = 60):
+    with get_connection() as conn:
+        return pd.read_sql_query("""
+            SELECT recorded_at, vial_counter, planned_vials, line_speed_vpm, changeover_active, changeover_duration_min, alarm_code
+            FROM packaging_telemetry
+            WHERE line_id = ?
+            ORDER BY recorded_at DESC
+            LIMIT ?
+        """, conn, params=(LINE_ID, limit))
 
-        pending_dev = con.execute("""
-            SELECT deviation_id, incident_id, generated_at, machine_id, error_code, deviation_summary, agent_raw_transcript 
-            FROM deviation_records 
-            WHERE status = 'PENDING_REVIEW' 
-            ORDER BY generated_at ASC 
-            LIMIT 1
-        """).fetchone()
+def load_pending_deviations():
+    with get_connection() as conn:
+        return pd.read_sql_query("""
+            SELECT deviation_id, incident_id, generated_at, line_id, alarm_code, deviation_summary, agent_raw_transcript, status
+            FROM deviation_records
+            WHERE status = 'PENDING_REVIEW'
+            ORDER BY generated_at DESC
+        """, conn)
 
-        con.close()
-        return latest, oee_df, queue_df, processing_job, pending_dev
-    except Exception:
-        return None, pd.DataFrame(), pd.DataFrame(), None, None
+def load_audit_trail():
+    with get_connection() as conn:
+        return pd.read_sql_query("""
+            SELECT audit_id, deviation_id, signed_at, signer_name, signer_role, signature_intent, sha256_checksum
+            FROM gxp_audit_trail
+            ORDER BY signed_at DESC
+        """, conn)
 
-latest_row, oee_data, queue_data, active_job, active_deviation = fetch_system_state()
+def sign_and_approve_deviation(dev_id: str, transcript: str, name: str, role: str, intent: str):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    audit_id = f"AUDIT-{int(datetime.now(timezone.utc).timestamp())}"
 
-# Auto-refresh runs continuously to track queue updates
-# Pauses only when supervisor is actively viewing a report waiting for sign-off
-if active_deviation is None:
-    st_autorefresh(interval=2000, key="historian_poll")
-
-# 2. Header & Metrics
-st.title("🏭 AsepticOps Copilot")
-st.caption("Shop-Floor Diagnostics | Persistent Incident Queue | 21 CFR Part 11 Electronic Ledger")
-
-def calculate_oee(df: pd.DataFrame):
-    if df.empty:
-        return 0.0, 0.0, 0.0, 0.0
-    total = len(df)
-    operating = (df["error_code"] == 0).sum()
-    availability = operating / total if total > 0 else 0.0
-    speeds = df[df["error_code"] == 0]["speed_cpm"]
-    avg_speed = speeds.mean() if not speeds.empty else 0.0
-    performance = min(1.0, avg_speed / 180.0)
-    quality = ((df["temp_c"] >= 110.0).sum()) / total if total > 0 else 0.0
-    return availability * performance * quality * 100, availability * 100, performance * 100, quality * 100
-
-oee_val, avail_val, perf_val, qual_val = calculate_oee(oee_data)
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Overall OEE", f"{oee_val:.1f} %")
-m2.metric("Availability", f"{avail_val:.1f} %")
-m3.metric("Performance", f"{perf_val:.1f} %")
-m4.metric("Quality", f"{qual_val:.1f} %")
-
-st.divider()
-
-# 3. Telemetry Snapshot
-t1, t2, t3, t4 = st.columns(4)
-if latest_row:
-    rec_time, machine_id, temp_c, speed_cpm, err_code = latest_row
-    t1.metric("Asset ID", machine_id)
-    t2.metric("Seal Temperature", f"{temp_c:.1f} °C", delta=f"{temp_c - 125.0:.1f} °C vs Spec", delta_color="normal" if temp_c >= 110 else "inverse")
-    t3.metric("Line Speed", f"{speed_cpm:.1f} cpm")
-    t4.metric("Asset State", "NORMAL" if err_code == 0 else f"FAULT ({err_code})")
-else:
-    st.info("No telemetry records detected.")
-
-st.divider()
-
-# 4. Active Investigation Banner
-if active_job:
-    job_id, j_mach, j_err, j_reason, j_time = active_job
-    with st.container(border=True):
-        st.markdown(f"#### ⚙️ Agent Currently Triaging: `{job_id}`")
-        st.write(f"🔄 **Status:** LLM Reasoning In Progress... | **Asset:** `{j_mach}` | **Fault Code:** `{j_err}` | **Reason:** {j_reason}")
-
-# 5. Incident Queue Table with Status Icons
-st.subheader("📋 Incident Backlog & Execution Queue")
-if not queue_data.empty:
-    status_icon_map = {
-        "PROCESSING": "⚙️ RUNNING",
-        "QUEUED": "⏳ IN QUEUE",
-        "PENDING_REVIEW": "📝 AWAITING SIGN-OFF",
-        "RESOLVED": "✅ COMPLETED",
-        "FAILED": "❌ FAILED"
+    manifest_data = {
+        "audit_id": audit_id,
+        "deviation_id": dev_id,
+        "timestamp_utc": now_iso,
+        "signer_name": name,
+        "signer_role": role,
+        "signature_intent": intent,
+        "content_body": transcript
     }
-    display_df = queue_data.copy()
-    display_df["status"] = display_df["status"].map(lambda s: status_icon_map.get(s, s))
+    raw_payload = json.dumps(manifest_data, sort_keys=True)
+    sha256_hash = hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
+    manifest_data["sha256_checksum"] = sha256_hash
 
-    st.dataframe(
-        display_df,
-        column_config={
-            "incident_id": "Incident ID",
-            "detected_at": "Timestamp",
-            "machine_id": "Asset",
-            "error_code": "Fault Code",
-            "qualification_reason": "Trigger Qualification",
-            "status": "Queue State"
-        },
-        hide_index=True,
-        use_container_width=True
-    )
+    with get_connection() as conn:
+        conn.execute("UPDATE deviation_records SET status = 'APPROVED' WHERE deviation_id = ?", (dev_id,))
+        conn.execute("""
+            INSERT INTO gxp_audit_trail
+            (audit_id, deviation_id, signed_at, signer_name, signer_role, signature_intent, sha256_checksum)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (audit_id, dev_id, now_iso, name, role, intent, sha256_hash))
+        conn.commit()
+
+    manifest_filepath = os.path.join(AUDIT_VAULT_DIR, f"{audit_id}_{dev_id}.json")
+    with open(manifest_filepath, "w") as f:
+        json.dump(manifest_data, f, indent=4)
+
+    return audit_id, sha256_hash, manifest_filepath
+
+st.title("🏭 Sterile Vial Packaging — Supervisory & QA Portal")
+st.caption(f"Line Asset: **{LINE_ID}** | Validated Shift Target: **{PLANNED_SHIFT_VIALS:,} vials**")
+
+telemetry_df = load_latest_telemetry(60)
+
+if not telemetry_df.empty:
+    latest = telemetry_df.iloc[0]
+    vial_cnt = int(latest["vial_counter"])
+    planned = int(latest["planned_vials"])
+    speed = float(latest["line_speed_vpm"])
+    is_changeover = bool(latest["changeover_active"])
+    changeover_dur = float(latest["changeover_duration_min"])
+    alarm = int(latest["alarm_code"])
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Current Yield", f"{vial_cnt:,} / {planned:,}", f"{round((vial_cnt/planned)*100, 1)}% Target")
+    k2.metric("Line Speed", f"{speed:.1f} VPM", "Nominal 120 VPM")
+    k3.metric("Changeover Timer", f"{changeover_dur:.1f} min" if is_changeover else "RUNNING", "Max 45 min" if is_changeover else "Normal")
+    k4.metric("Operational Status", "NORMAL" if alarm == 0 else f"ALARM {alarm}", "Fault" if alarm != 0 else "Clear")
+
+    pct_complete = min(1.0, max(0.0, vial_cnt / planned))
+    st.progress(pct_complete, text=f"Shift Batch Completion: {round(pct_complete * 100, 1)}%")
+
+    st.subheader("Line Speed History (Last 60s)")
+    chart_df = telemetry_df[["recorded_at", "line_speed_vpm"]].sort_values("recorded_at")
+    st.line_chart(chart_df.set_index("recorded_at"))
 else:
-    st.info("Queue is empty. Waiting for fault triggers.")
+    st.info("Awaiting telemetry stream. Start edge_packaging_simulator.py to ingest data.")
 
-# 6. GxP Deviation Report Review (Where the LLM Output Shows)
-if active_deviation:
-    dev_id, inc_id, gen_time, mach_id, err, summary, transcript = active_deviation
-    st.divider()
-    st.subheader(f"📋 GxP Deviation Review: {dev_id}")
-    st.warning(f"⚠️ **Review Required:** Anomaly on asset `{mach_id}` (Reference Incident: `{inc_id}`)")
+st.divider()
 
-    # Dynamic LLM Report Output Container
-    with st.container(border=True):
-        st.markdown("### 📄 Root Cause & Deviation Analysis (LLM Output)")
-        st.markdown(transcript)
+st.subheader("📋 Pending AI Deviation & CAPA Investigations")
+pending_devs = load_pending_deviations()
 
-    # 21 CFR Part 11 Electronic Signature Box
-    with st.container(border=True):
-        st.markdown("### ✍️ Supervisor Electronic Sign-Off")
-        c1, c2 = st.columns(2)
-        with c1:
-            signer_name = st.text_input("Approver Identity", value="Darvin Sureskumar")
-            signer_role = st.selectbox("Designation", ["Lead Systems Engineer", "Quality Assurance Lead", "Shift Automation Engineer"])
-        with c2:
-            intent = st.selectbox("Signature Intent", [
-                "I authorize diagnostic conclusions and confirm containment",
-                "I approve CAPA actions and release line for maintenance",
-                "Investigation rejected - Physical inspection required"
-            ])
-            certify = st.checkbox("I verify that the above entries are accurate and legally binding.", value=True)
+if pending_devs.empty:
+    st.success("No pending deviations requiring QA review.")
+else:
+    for idx, row in pending_devs.iterrows():
+        dev_id = row["deviation_id"]
+        inc_id = row["incident_id"]
+        alarm_code = row["alarm_code"]
+        summary = row["deviation_summary"]
+        transcript = row["agent_raw_transcript"]
 
-        if st.button("🔒 Authorize & Digitally Sign Deviation", type="primary", use_container_width=True):
-            if certify:
-                sign_timestamp = datetime.now(timezone.utc).isoformat()
-                record_payload = f"{dev_id}|{inc_id}|{transcript}|{signer_name}|{sign_timestamp}"
-                sha_hash = hashlib.sha256(record_payload.encode()).hexdigest()
+        with st.expander(f"⚠️ {dev_id} | Incident {inc_id} | Alarm {alarm_code} — {summary}", expanded=True):
+            st.markdown(transcript)
+            
+            with st.form(key=f"sign_form_{dev_id}"):
+                c1, c2 = st.columns(2)
+                signer_name = c1.text_input("Signer Full Name", value="Darvin Sureskumar")
+                signer_role = c1.selectbox("Role", ["Quality Assurance Lead", "Packaging Operations Supervisor", "Qualified Person (QP)"])
+                signer_intent = c2.selectbox("Signature Intent", [
+                    "I approve the root cause analysis and immediate containment actions.",
+                    "I confirm batch disposition and authorized CAPA implementation."
+                ])
+                password_confirm = c2.text_input("Credential / PIN", type="password")
+                
+                submitted = st.form_submit_button("Electronically Sign & Authorize (SHA-256)")
+                if submitted:
+                    if not password_confirm:
+                        st.error("PIN authentication required.")
+                    else:
+                        audit_id, digest, filepath = sign_and_approve_deviation(
+                            dev_id, transcript, signer_name, signer_role, signer_intent
+                        )
+                        st.success(f"Authorized: {audit_id}")
+                        st.code(f"SHA-256: {digest}\nVault: {filepath}", language="text")
+                        st.rerun()
 
-                con = duckdb.connect("plant_data.duckdb")
-                con.execute("""
-                    INSERT INTO gxp_audit_trail VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, [str(uuid.uuid4())[:8], dev_id, sign_timestamp, signer_name, signer_role, intent, sha_hash])
-
-                con.execute("UPDATE deviation_records SET status = 'APPROVED' WHERE deviation_id = ?", [dev_id])
-                con.execute("UPDATE incident_queue SET status = 'RESOLVED' WHERE incident_id = ?", [inc_id])
-                con.close()
-
-                st.success(f"Deviation {dev_id} signed and archived. Loading next case...")
-                st.rerun()
-            else:
-                st.warning("Please check the verification box to sign.")
+st.divider()
+st.subheader("🔒 Immutable GxP Audit Trail Ledger")
+audit_df = load_audit_trail()
+if not audit_df.empty:
+    st.dataframe(audit_df, use_container_width=True)
+else:
+    st.write("No electronic signatures committed yet.")
