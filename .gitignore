@@ -17,3 +17,17 @@ mosquitto/log/*
 .DS_Store
 Thumbs.db
 set_credentials.py
+
+# SQLite Databases & WAL/SHM Runtime Files
+*.db
+*.db-shm
+*.db-wal
+local_queue.*
+plant_data.*
+
+# GxP Local Audit Vault (Runtime JSON Manifests)
+audit_vault/
+
+# Credentials & Environment Files
+.env
+*.csv
