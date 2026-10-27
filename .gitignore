@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.env
+*.csv
 .venv/
 env/
 *.duckdb
@@ -15,3 +16,25 @@ mosquitto/log/*
 .vscode/
 .DS_Store
 Thumbs.db
+set_credentials.py
+
+# SQLite Databases & WAL/SHM Runtime Files
+*.db
+*.db-shm
+*.db-wal
+local_queue.*
+plant_data.*
+
+# GxP Local Audit Vault (Runtime JSON Manifests)
+audit_vault/
+
+# Credentials & Environment Files
+.env
+*.csv*.db 
+*.db-shm 
+*.db-wal 
+local_queue.* 
+plant_data.* 
+audit_vault/ 
+.env 
+*.csv 
