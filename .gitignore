@@ -30,4 +30,11 @@ audit_vault/
 
 # Credentials & Environment Files
 .env
-*.csv
+*.csv*.db 
+*.db-shm 
+*.db-wal 
+local_queue.* 
+plant_data.* 
+audit_vault/ 
+.env 
+*.csv 
