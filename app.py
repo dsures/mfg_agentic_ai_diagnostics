@@ -82,31 +82,41 @@ def sign_and_approve_deviation(dev_id: str, transcript: str, name: str, role: st
 st.title("🏭 Sterile Vial Packaging — Supervisory & QA Portal")
 st.caption(f"Line Asset: **{LINE_ID}** | Validated Shift Target: **{PLANNED_SHIFT_VIALS:,} vials**")
 
-telemetry_df = load_latest_telemetry(60)
+# Sidebar Controls
+st.sidebar.header("Controls")
+auto_refresh = st.sidebar.checkbox("Auto-refresh Dashboard (5s)", value=True)
 
-if not telemetry_df.empty:
-    latest = telemetry_df.iloc[0]
-    vial_cnt = int(latest["vial_counter"])
-    planned = int(latest["planned_vials"])
-    speed = float(latest["line_speed_vpm"])
-    is_changeover = bool(latest["changeover_active"])
-    changeover_dur = float(latest["changeover_duration_min"])
-    alarm = int(latest["alarm_code"])
+# Define auto-refreshing telemetry block using st.fragment
+@st.fragment(run_every=5 if auto_refresh else None)
+def render_live_telemetry():
+    st.subheader("📡 Live Line Telemetry")
+    telemetry_df = load_latest_telemetry(60)
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Current Yield", f"{vial_cnt:,} / {planned:,}", f"{round((vial_cnt/planned)*100, 1)}% Target")
-    k2.metric("Line Speed", f"{speed:.1f} VPM", "Nominal 120 VPM")
-    k3.metric("Changeover Timer", f"{changeover_dur:.1f} min" if is_changeover else "RUNNING", "Max 45 min" if is_changeover else "Normal")
-    k4.metric("Operational Status", "NORMAL" if alarm == 0 else f"ALARM {alarm}", "Fault" if alarm != 0 else "Clear")
+    if not telemetry_df.empty:
+        latest = telemetry_df.iloc[0]
+        vial_cnt = int(latest["vial_counter"])
+        planned = int(latest["planned_vials"])
+        speed = float(latest["line_speed_vpm"])
+        is_changeover = bool(latest["changeover_active"])
+        changeover_dur = float(latest["changeover_duration_min"])
+        alarm = int(latest["alarm_code"])
 
-    pct_complete = min(1.0, max(0.0, vial_cnt / planned))
-    st.progress(pct_complete, text=f"Shift Batch Completion: {round(pct_complete * 100, 1)}%")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Current Yield", f"{vial_cnt:,} / {planned:,}", f"{round((vial_cnt/planned)*100, 1)}% Target")
+        k2.metric("Line Speed", f"{speed:.1f} VPM", "Nominal 120 VPM")
+        k3.metric("Changeover Timer", f"{changeover_dur:.1f} min" if is_changeover else "RUNNING", "Max 45 min" if is_changeover else "Normal")
+        k4.metric("Operational Status", "NORMAL" if alarm == 0 else f"ALARM {alarm}", "Fault" if alarm != 0 else "Clear")
 
-    st.subheader("Line Speed History (Last 60s)")
-    chart_df = telemetry_df[["recorded_at", "line_speed_vpm"]].sort_values("recorded_at")
-    st.line_chart(chart_df.set_index("recorded_at"))
-else:
-    st.info("Awaiting telemetry stream. Start edge_packaging_simulator.py to ingest data.")
+        pct_complete = min(1.0, max(0.0, vial_cnt / planned))
+        st.progress(pct_complete, text=f"Shift Batch Completion: {round(pct_complete * 100, 1)}%")
+
+        st.subheader("Line Speed History (Last 60s)")
+        chart_df = telemetry_df[["recorded_at", "line_speed_vpm"]].sort_values("recorded_at")
+        st.line_chart(chart_df.set_index("recorded_at"))
+    else:
+        st.info("Awaiting telemetry stream. Ensure edge_packaging_simulator.py is running.")
+
+render_live_telemetry()
 
 st.divider()
 
