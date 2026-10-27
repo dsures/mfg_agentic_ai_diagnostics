@@ -59,9 +59,9 @@ Manufacturing packaging lines require rigorous real-time monitoring and immutabl
 ├── requirements.txt              # Project dependencies
 └── README.md
 
-
-## ⚙️ Setup & Installation
-
+```
+### ⚙️ Setup & Installation
+```
 ### 1. Clone & Navigate to Repository
 ```cmd
 git clone https://github.com/dsures/mfg_agentic_ai_diagnostics.git
