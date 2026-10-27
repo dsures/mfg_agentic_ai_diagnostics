@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.env
+*.csv
 .venv/
 env/
 *.duckdb
@@ -15,3 +16,4 @@ mosquitto/log/*
 .vscode/
 .DS_Store
 Thumbs.db
+set_credentials.py

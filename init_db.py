@@ -1,83 +1,100 @@
-import duckdb
+import sqlite3
+import os
 
-def init_database():
-    con = duckdb.connect("plant_data.duckdb")
-    print("Initializing DuckDB schema on plant_data.duckdb...")
+DB_PATH = "plant_data.db"
 
-    # 1. Industrial Telemetry Historian
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS raw_telemetry (
-        recorded_at TIMESTAMP NOT NULL,
-        machine_id VARCHAR NOT NULL,
-        temp_c DOUBLE NOT NULL,
-        speed_cpm DOUBLE NOT NULL,
-        error_code INTEGER NOT NULL
+def initialize_database():
+    print(f"Configuring high-concurrency WAL database: {DB_PATH}...")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Enforce WAL mode and 10-second busy timeout for zero-collision concurrency
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
+
+    # 1. Real-Time Packaging Telemetry
+    cursor.execute("DROP TABLE IF EXISTS packaging_telemetry;")
+    cursor.execute("""
+    CREATE TABLE packaging_telemetry (
+        recorded_at TEXT NOT NULL,
+        line_id TEXT NOT NULL,
+        vial_counter INTEGER NOT NULL,
+        planned_vials INTEGER NOT NULL,
+        line_speed_vpm REAL NOT NULL,
+        changeover_active INTEGER NOT NULL,
+        changeover_duration_min REAL NOT NULL,
+        alarm_code INTEGER NOT NULL
     );
     """)
 
-    # 2. CMMS Maintenance History (for Agent RCA grounding)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS cmms_history (
-        error_code INTEGER PRIMARY KEY,
-        failure_mode VARCHAR NOT NULL,
-        root_cause VARCHAR NOT NULL,
-        resolution VARCHAR NOT NULL
+    # 2. Local Incident Queue
+    cursor.execute("DROP TABLE IF EXISTS local_incident_queue;")
+    cursor.execute("""
+    CREATE TABLE local_incident_queue (
+        incident_id TEXT PRIMARY KEY,
+        detected_at TEXT NOT NULL,
+        line_id TEXT NOT NULL,
+        alarm_code INTEGER NOT NULL,
+        qualification_reason TEXT NOT NULL,
+        vial_count_snapshot INTEGER NOT NULL,
+        status TEXT NOT NULL
     );
     """)
 
-    # Seed CMMS records if empty
-    res = con.execute("SELECT COUNT(*) FROM cmms_history").fetchone()[0]
-    if res == 0:
-        con.execute("""
-        INSERT INTO cmms_history VALUES
-        (104, 'Sealing Heat Excursion / Thermocouple Fault', 
-              'Thermocouple drift causing false low readings and automatic heater shutoff', 
-              'Inspect thermocouple lead B; verify heater band continuity; replace if drift exceeds +/- 3 C');
-        """)
-        print("[+] Seeded CMMS failure records.")
-
-    # 3. Incident Execution Queue (Decoupled FIFO Buffer)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS incident_queue (
-        incident_id VARCHAR PRIMARY KEY,
-        detected_at TIMESTAMP NOT NULL,
-        machine_id VARCHAR NOT NULL,
-        error_code INTEGER NOT NULL,
-        qualification_reason VARCHAR NOT NULL,
-        status VARCHAR DEFAULT 'QUEUED', -- QUEUED, PROCESSING, PENDING_REVIEW, RESOLVED
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-
-    # 4. GxP Deviation Records (Persistent Agent Output)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS deviation_records (
-        deviation_id VARCHAR PRIMARY KEY,
-        incident_id VARCHAR,
-        generated_at TIMESTAMP NOT NULL,
-        machine_id VARCHAR NOT NULL,
-        error_code INTEGER NOT NULL,
+    # 3. Deviation Records (AI Investigation Storage)
+    cursor.execute("DROP TABLE IF EXISTS deviation_records;")
+    cursor.execute("""
+    CREATE TABLE deviation_records (
+        deviation_id TEXT PRIMARY KEY,
+        incident_id TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        line_id TEXT NOT NULL,
+        alarm_code INTEGER NOT NULL,
         deviation_summary TEXT NOT NULL,
         agent_raw_transcript TEXT NOT NULL,
-        status VARCHAR DEFAULT 'PENDING_REVIEW' -- PENDING_REVIEW, APPROVED
+        status TEXT NOT NULL
     );
     """)
 
-    # 5. 21 CFR Part 11 Electronic Signature Ledger
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS gxp_audit_trail (
-        audit_id VARCHAR PRIMARY KEY,
-        deviation_id VARCHAR,
-        signed_at TIMESTAMP NOT NULL,
-        signer_id VARCHAR NOT NULL,
-        signer_role VARCHAR NOT NULL,
-        signature_meaning VARCHAR NOT NULL,
-        record_sha256 VARCHAR NOT NULL
+    # 4. 21 CFR Part 11 Electronic Signature Audit Trail
+    cursor.execute("DROP TABLE IF EXISTS gxp_audit_trail;")
+    cursor.execute("""
+    CREATE TABLE gxp_audit_trail (
+        audit_id TEXT PRIMARY KEY,
+        deviation_id TEXT NOT NULL,
+        signed_at TEXT NOT NULL,
+        signer_name TEXT NOT NULL,
+        signer_role TEXT NOT NULL,
+        signature_intent TEXT NOT NULL,
+        sha256_checksum TEXT NOT NULL
     );
     """)
 
-    con.close()
-    print("All plant, queue, and audit tables verified.")
+    # 5. CMMS Maintenance & Failure Mode History
+    cursor.execute("DROP TABLE IF EXISTS cmms_history;")
+    cursor.execute("""
+    CREATE TABLE cmms_history (
+        record_id TEXT PRIMARY KEY,
+        alarm_code INTEGER NOT NULL,
+        subsystem TEXT NOT NULL,
+        historical_root_cause TEXT NOT NULL,
+        recommended_action TEXT NOT NULL
+    );
+    """)
+
+    # Seed failure modes
+    cursor.executemany("""
+    INSERT INTO cmms_history VALUES (?, ?, ?, ?, ?)
+    """, [
+        ('CMMS-301', 301, 'Vision Inspection & Labeler', 'High-speed camera strobe light misalignment or optical lens fogging causing false OCR rejections on 2D DataMatrix/Lot codes.', 'Clean camera optical lens with lint-free alcohol wipe, re-zero focal distance calibration target, and perform 10-vial test challenge.'),
+        ('CMMS-302', 302, 'Vial Crimp & Sealing Station', 'Pneumatic crimp-head pressure drop below 4.5 bar or worn aluminum tear-off skirt crimping knife edge causing loose closures.', 'Inspect pneumatic pressure regulator line, check crimping spring tension gauge, and execute container closure integrity (CCI) gauge check on 5 consecutive samples.'),
+        ('CMMS-303', 303, 'Format Tooling & Starwheel', 'Guide rail binding or mechanical pocket spacing misalignment when changing from 2 mL to 10 mL changeover pucks exceeding 45-min SOP limit.', 'Verify torque tolerance on guide rail hand knobs, lubricate starwheel indexing drive spline, and inspect rail levelers using digital gauge.'),
+        ('CMMS-304', 304, 'Cartoner Infeed & Blister Pusher', 'Push-rod mechanical safety slip clutch triggered due to bent carton flap obstruction in carton magazine throat.', 'De-energize machine, clear jammed carton stock, inspect push-rod timing sensor alignment, and execute complete line clearance before resetting safety clutch.')
+    ])
+
+    conn.commit()
+    conn.close()
+    print("✅ All tables cleanly created in plant_data.db with WAL mode enabled.")
 
 if __name__ == "__main__":
-    init_database()
+    initialize_database()
