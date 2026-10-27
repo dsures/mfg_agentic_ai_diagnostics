@@ -1,4 +1,4 @@
-# 🏭 GxP-Compliant Agentic AI Diagnostics for Pharmaceutical Vial Packaging
+# 🏭 GxP-Compliant Agentic AI Diagnostics for Pharmaceutical Manufacturing
 
 A local-first, event-driven agentic observability and deviation management system designed for pharmaceutical vial packaging lines. Built to satisfy **21 CFR Part 11** electronic record and signature requirements, substituting complex cloud governance with zero-collision local execution.
 
